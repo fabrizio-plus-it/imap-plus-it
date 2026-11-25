@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { ImapFlow } from 'imapflow';
 
-const host = process.env.IMAP_HOST ?? 'imap.skymail.net.br';
+const host = process.env.IMAP_HOST;
 const port = Number(process.env.IMAP_PORT ?? '993');
 const token = process.env.IMAP_AUTH_CHECK_TOKEN ?? '';
 
@@ -32,7 +32,7 @@ export default async (request) => {
 
   const username = process.env.IMAP_USERNAME;
   const password = process.env.IMAP_PASSWORD;
-  if (!username || !password || !Number.isInteger(port) || port < 1 || port > 65535) {
+  if (!host || !username || !password || !Number.isInteger(port) || port < 1 || port > 65535) {
     return response(false, 500);
   }
 

@@ -1,8 +1,15 @@
 import { connect } from 'node:tls';
 
 export default async () => {
-  const host = 'imap.skymail.net.br';
-  const port = 993;
+  const host = process.env.IMAP_HOST;
+  const port = Number(process.env.IMAP_PORT ?? '993');
+
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return Response.json({ ok: false }, {
+      status: 500,
+      headers: { 'Cache-Control': 'no-store' },
+    });
+  }
 
   const result = await new Promise((resolve) => {
     const socket = connect({ host, port, servername: host, rejectUnauthorized: true });

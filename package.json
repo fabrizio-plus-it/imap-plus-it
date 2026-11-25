@@ -5,6 +5,9 @@
   "engines": {
     "node": ">=20"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {
     "imapflow": "^1.2.2"
   }

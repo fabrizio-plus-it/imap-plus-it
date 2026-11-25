@@ -4,3 +4,15 @@
 
 [functions]
   node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/emails"
+  to = "/.netlify/functions/emails"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/emails/*"
+  to = "/.netlify/functions/emails/:splat"
+  status = 200
+  force = true

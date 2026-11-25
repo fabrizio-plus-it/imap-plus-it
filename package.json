@@ -1,0 +1,11 @@
+{
+  "name": "imap-plus-it",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "imapflow": "^1.2.2"
+  }
+}

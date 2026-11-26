@@ -10,12 +10,23 @@ const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 50;
 const MAX_CANDIDATE_UIDS = 1000;
 const MAX_BODY_BYTES = 256 * 1024;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_FILTER_LENGTH = 200;
 
 function parseRoute(request) {
   const pathname = new URL(request.url).pathname;
   const match = pathname.match(/(?:^|\/)emails(?:\/([^/]+))?\/?$/);
   return match ? (match[1] ? decodeURIComponent(match[1]) : null) : undefined;
+}
+
+function parseAttachmentRoute(request) {
+  const pathname = new URL(request.url).pathname;
+  const match = pathname.match(/(?:^|\/)emails\/([^/]+)\/attachments\/([^/]+)\/?$/);
+  if (!match) return null;
+  return {
+    messageId: decodeURIComponent(match[1]),
+    attachmentId: decodeURIComponent(match[2]),
+  };
 }
 
 function parseLimit(value) {
@@ -62,6 +73,22 @@ function parseFilters(url) {
   return { limit, query };
 }
 
+function effectiveSearchQuery(query) {
+  if (!query.before) return query;
+
+  // ImapFlow uses the server's WITHIN extension when available. A future
+  // BEFORE date becomes "older than 0 seconds" there, which incorrectly
+  // matches nothing. A future upper bound does not restrict today's mailbox,
+  // so omit it from the IMAP search.
+  const today = new Date().toISOString().slice(0, 10);
+  if (query.before > today) {
+    const { before, ...withoutFutureBefore } = query;
+    return withoutFutureBefore;
+  }
+
+  return query;
+}
+
 function uidValidityString(mailbox) {
   if (mailbox?.uidValidity === undefined || mailbox?.uidValidity === null) return null;
   return String(mailbox.uidValidity);
@@ -95,33 +122,33 @@ function messageMetadata(message, uidValidity) {
   };
 }
 
-function findTextPart(node, preferredType = 'text/plain', path = '1') {
-  if (!node) return null;
-  if (node.childNodes?.length) {
-    let fallback = null;
-    for (let index = 0; index < node.childNodes.length; index += 1) {
-      const found = findTextPart(node.childNodes[index], preferredType, `${path}.${index + 1}`);
-      if (found?.type === preferredType) return found;
-      if (found && !fallback) fallback = found;
-    }
-    return fallback;
-  }
+function collectMimeParts(node, path = '1', result = { text: [], attachments: [] }) {
+  if (!node) return result;
 
   const type = String(node.type ?? '').toLowerCase();
   const disposition = String(node.disposition ?? '').toLowerCase();
-  if (type === preferredType && disposition !== 'attachment') {
-    return { part: node.part ?? path, type };
+  const part = node.part ?? path;
+  const filename = node.dispositionParameters?.filename ?? node.parameters?.name ?? null;
+
+  if (type === 'text/plain' || type === 'text/html') {
+    if (disposition !== 'attachment') result.text.push({ part, type });
+  } else if (disposition === 'attachment' || filename) {
+    result.attachments.push({
+      id: part,
+      filename: filename || `attachment-${part}`,
+      contentType: type || 'application/octet-stream',
+      size: Number.isFinite(node.size) ? node.size : null,
+    });
   }
-  if (type === 'text/html' && disposition !== 'attachment') {
-    return { part: node.part ?? path, type };
+
+  if (node.childNodes?.length) {
+    node.childNodes.forEach((child, index) => collectMimeParts(child, `${path}.${index + 1}`, result));
   }
-  return null;
+
+  return result;
 }
 
-async function readTextBody(client, uid, bodyStructure) {
-  const part = findTextPart(bodyStructure);
-  if (!part) return { body: '', contentType: null, truncated: false };
-
+async function downloadPartText(client, uid, part) {
   const download = await client.download(uid, part.part, {
     uid: true,
     maxBytes: MAX_BODY_BYTES,
@@ -137,11 +164,38 @@ async function readTextBody(client, uid, bodyStructure) {
     if (buffer.length > remaining) break;
   }
 
-  return {
-    body: Buffer.concat(chunks).toString('utf8'),
-    contentType: part.type,
-    truncated: size >= MAX_BODY_BYTES,
-  };
+  return { text: Buffer.concat(chunks).toString('utf8'), truncated: size >= MAX_BODY_BYTES };
+}
+
+function htmlToText(html) {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|tr|h[1-6])\s*>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+async function readTextBody(client, uid, bodyStructure) {
+  const parts = collectMimeParts(bodyStructure).text;
+  for (const part of parts.sort((a, b) => (a.type === 'text/plain' ? -1 : 1) - (b.type === 'text/plain' ? -1 : 1))) {
+    const downloaded = await downloadPartText(client, uid, part);
+    const body = part.type === 'text/html' ? htmlToText(downloaded.text) : downloaded.text;
+    if (body.trim()) {
+      return { body, contentType: part.type, truncated: downloaded.truncated };
+    }
+  }
+
+  return { body: '', contentType: parts[0]?.type ?? null, truncated: false };
 }
 
 async function listEmails(client, url) {
@@ -152,7 +206,7 @@ async function listEmails(client, url) {
   const uidValidity = uidValidityString(mailbox);
   if (!uidValidity) return jsonResponse({ error: 'mailbox UIDVALIDITY unavailable' }, 502);
 
-  const foundUids = await client.search(filters.query, { uid: true });
+  const foundUids = await client.search(effectiveSearchQuery(filters.query), { uid: true });
   const uids = Array.isArray(foundUids) ? foundUids.slice(-MAX_CANDIDATE_UIDS) : [];
   if (!uids.length) return jsonResponse([]);
 
@@ -192,6 +246,7 @@ async function getEmail(client, id) {
   }
 
   const body = await readTextBody(client, requested.uid, message.bodyStructure);
+  const attachments = collectMimeParts(message.bodyStructure).attachments;
   const envelope = message.envelope ?? {};
   return jsonResponse({
     ...messageMetadata(message, uidValidity),
@@ -200,6 +255,60 @@ async function getEmail(client, id) {
     body: body.body,
     contentType: body.contentType,
     bodyTruncated: body.truncated,
+    attachments,
+  });
+}
+
+async function downloadAttachment(client, route) {
+  const requested = parseMessageId(route.messageId);
+  if (!requested || !/^\d+(?:\.\d+)*$/.test(route.attachmentId)) {
+    return jsonResponse({ error: 'attachment id is invalid or obsolete' }, 404);
+  }
+
+  const mailbox = await client.mailboxOpen('INBOX', { readOnly: true });
+  const uidValidity = uidValidityString(mailbox);
+  if (!uidValidity || uidValidity !== requested.uidValidity) {
+    return jsonResponse({ error: 'message id is invalid or obsolete' }, 404);
+  }
+
+  const message = await client.fetchOne(requested.uid, {
+    uid: true,
+    bodyStructure: true,
+  }, { uid: true });
+  if (!message || message.uid !== requested.uid) {
+    return jsonResponse({ error: 'message not found' }, 404);
+  }
+
+  const attachment = collectMimeParts(message.bodyStructure).attachments
+    .find(item => item.id === route.attachmentId);
+  if (!attachment) {
+    return jsonResponse({ error: 'attachment not found' }, 404);
+  }
+
+  const download = await client.download(requested.uid, attachment.id, {
+    uid: true,
+    maxBytes: MAX_ATTACHMENT_BYTES + 1,
+  });
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of download.content) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > MAX_ATTACHMENT_BYTES) {
+      return jsonResponse({ error: 'attachment exceeds the 25 MiB limit' }, 413);
+    }
+    chunks.push(buffer);
+  }
+
+  const safeFilename = attachment.filename.replace(/[\r\n"]/g, '_') || 'attachment';
+  return new Response(Buffer.concat(chunks), {
+    status: 200,
+    headers: {
+      'Cache-Control': 'no-store',
+      'Content-Type': attachment.contentType,
+      'Content-Length': String(size),
+      'Content-Disposition': `attachment; filename="${safeFilename}"`,
+    },
   });
 }
 
@@ -214,6 +323,8 @@ export async function handleEmailsRequest(request, dependencies = {}) {
   try {
     await client.connect();
     const url = new URL(request.url);
+    const attachmentRoute = parseAttachmentRoute(request);
+    if (attachmentRoute) return await downloadAttachment(client, attachmentRoute);
     const id = parseRoute(request);
     if (id === undefined) return jsonResponse({ error: 'invalid route' }, 404);
     return id === null ? await listEmails(client, url) : await getEmail(client, id);

@@ -39,6 +39,7 @@ class FakeClient {
     this.logoutCalls = 0;
     this.closeCalls = 0;
     this.flags = new Set(['\\Seen']);
+    this.bodyStructure = { type: 'text/plain', part: undefined };
   }
 
   async connect() {}
@@ -68,7 +69,7 @@ class FakeClient {
       internalDate: new Date('2026-01-02T10:00:00Z'),
       flags: this.flags,
       envelope: { from: [{ address: 'new@example.test' }], to: [{ address: 'me@example.test' }], subject: 'New' },
-      bodyStructure: { type: 'text/plain', part: undefined },
+      bodyStructure: this.bodyStructure,
     };
   }
 
@@ -129,6 +130,17 @@ test('rejects invalid filter values', async () => {
   assert.equal(client.logoutCalls, 1);
 });
 
+test('ignores a future before date instead of returning an empty result', async () => {
+  const client = new FakeClient();
+  const response = await handleEmailsRequest(
+    request('/emails?from=sender%40example.test&before=2099-12-31'),
+    { createClient: () => client },
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(client.searchCalls[0].query, { from: 'sender@example.test' });
+});
+
 test('reads a UIDVALIDITY-bound message without changing Seen', async () => {
   const client = new FakeClient();
   const response = await handleEmailsRequest(request('/emails/v1.77.12'), { createClient: () => client });
@@ -144,7 +156,80 @@ test('reads a UIDVALIDITY-bound message without changing Seen', async () => {
     body: 'hello from IMAP',
     contentType: 'text/plain',
     bodyTruncated: false,
+    attachments: [],
   });
+  assert.equal(client.mailboxOpenCalls[0].options.readOnly, true);
+  assert.equal(client.downloadCalls[0].options.uid, true);
+  assert.deepEqual([...client.flags], ['\\Seen']);
+  assert.equal(client.logoutCalls, 1);
+});
+
+test('falls back to non-empty HTML and returns attachment metadata', async () => {
+  const client = new FakeClient();
+  client.bodyStructure = {
+    type: 'multipart/mixed',
+    childNodes: [
+      {
+        type: 'multipart/alternative',
+        part: '1',
+        childNodes: [
+          { type: 'text/plain', part: '1.1', size: 2 },
+          { type: 'text/html', part: '1.2', size: 40 },
+        ],
+      },
+      {
+        type: 'application/pdf',
+        part: '2',
+        disposition: 'attachment',
+        dispositionParameters: { filename: 'documento.pdf' },
+        size: 1234,
+      },
+    ],
+  };
+  client.download = async (uid, part) => ({
+    content: Readable.from([Buffer.from(part === '1.1' ? '\r\n' : '<p>Mensagem encaminhada</p>')]),
+  });
+
+  const response = await handleEmailsRequest(request('/emails/v1.77.12'), { createClient: () => client });
+
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.body, 'Mensagem encaminhada');
+  assert.equal(body.contentType, 'text/html');
+  assert.deepEqual(body.attachments, [{
+    id: '2',
+    filename: 'documento.pdf',
+    contentType: 'application/pdf',
+    size: 1234,
+  }]);
+});
+
+test('downloads an attachment by MIME part id without changing Seen', async () => {
+  const client = new FakeClient();
+  client.bodyStructure = {
+    type: 'multipart/mixed',
+    childNodes: [{
+      type: 'application/pdf',
+      part: '2',
+      disposition: 'attachment',
+      dispositionParameters: { filename: 'documento.pdf' },
+      size: 7,
+    }],
+  };
+  client.download = async (uid, part, options) => {
+    client.downloadCalls.push({ uid, part, options });
+    return { content: Readable.from([Buffer.from('PDFDATA')]) };
+  };
+
+  const response = await handleEmailsRequest(
+    request('/emails/v1.77.12/attachments/2'),
+    { createClient: () => client },
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-type'), 'application/pdf');
+  assert.equal(response.headers.get('content-disposition'), 'attachment; filename="documento.pdf"');
+  assert.equal(await response.text(), 'PDFDATA');
   assert.equal(client.mailboxOpenCalls[0].options.readOnly, true);
   assert.equal(client.downloadCalls[0].options.uid, true);
   assert.deepEqual([...client.flags], ['\\Seen']);

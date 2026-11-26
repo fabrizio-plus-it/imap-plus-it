@@ -6,6 +6,12 @@
   node_bundler = "esbuild"
 
 [[redirects]]
+  from = "/mcp"
+  to = "/.netlify/functions/mcp"
+  status = 200
+  force = true
+
+[[redirects]]
   from = "/emails"
   to = "/.netlify/functions/emails"
   status = 200

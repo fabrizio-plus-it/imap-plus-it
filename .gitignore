@@ -8,3 +8,7 @@
 
 # Installed dependencies
 node_modules
+
+# Netlify function build artifacts
+netlify/functions/*.zip
+netlify/functions/manifest.json

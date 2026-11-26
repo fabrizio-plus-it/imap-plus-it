@@ -4,8 +4,8 @@ info:
   version: 1.0.0
   description: >-
     Read-only access to the INBOX. Message IDs include the IMAP UIDVALIDITY and
-    UID, so an ID becomes invalid if the mailbox is recreated. No attachments
-    are returned. Use this schema when configuring a private GPT Action.
+    UID, so an ID becomes invalid if the mailbox is recreated. Use this schema
+    when configuring a private GPT Action.
 servers:
   - url: https://imap-plus-it.netlify.app
 security:
@@ -96,6 +96,47 @@ paths:
                 $ref: '#/components/schemas/Error'
         '502':
           $ref: '#/components/responses/ImapFailure'
+  /emails/{id}/attachments/{attachmentId}:
+    get:
+      operationId: downloadAttachment
+      summary: Download one INBOX attachment
+      description: Downloads an attachment identified by its MIME part ID from a message ID returned by listEmails or getEmail.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Message ID returned by listEmails.
+          schema:
+            type: string
+            pattern: '^v1\\.[0-9]+\\.[1-9][0-9]*$'
+        - name: attachmentId
+          in: path
+          required: true
+          description: MIME part ID listed in the message attachments array, such as 2 or 1.2.
+          schema:
+            type: string
+            pattern: '^[0-9]+(\\.[0-9]+)*$'
+      responses:
+        '200':
+          description: Attachment bytes.
+          content:
+            application/octet-stream: {}
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Message or attachment ID is obsolete or does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Attachment exceeds the 25 MiB download limit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          $ref: '#/components/responses/ImapFailure'
 components:
   securitySchemes:
     bearerAuth:
@@ -122,7 +163,7 @@ components:
       allOf:
         - $ref: '#/components/schemas/EmailSummary'
         - type: object
-          required: [to, cc, body, contentType, bodyTruncated]
+          required: [to, cc, body, contentType, bodyTruncated, attachments]
           properties:
             to:
               type: string
@@ -136,6 +177,23 @@ components:
               nullable: true
             bodyTruncated:
               type: boolean
+            attachments:
+              type: array
+              description: Attachment metadata only; file contents are not downloaded by this route.
+              items:
+                type: object
+                required: [id, filename, contentType, size]
+                properties:
+                  id:
+                    type: string
+                    description: IMAP MIME part identifier for a future attachment download route.
+                  filename:
+                    type: string
+                  contentType:
+                    type: string
+                  size:
+                    type: integer
+                    nullable: true
     Error:
       type: object
       required: [error]

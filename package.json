@@ -6,9 +6,11 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "mcp": "node --input-type=module -e \"process.env.MCP_STDIO='1'; await import('./mcp/server.mjs')\""
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "imapflow": "^1.2.2"
   }
 }
